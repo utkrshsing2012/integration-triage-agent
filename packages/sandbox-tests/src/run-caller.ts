@@ -9,7 +9,13 @@ const execFileAsync = promisify(execFile);
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
-export type CallerFault = "none" | "caller_error";
+export type CallerFault =
+  | "none"
+  | "caller_error"
+  | "schema_drift"
+  | "rate_limit_429"
+  | "auth_expired"
+  | "upstream_timeout";
 
 export interface CallerLine {
   journey_id: string | null;
@@ -18,11 +24,17 @@ export interface CallerLine {
   request_id: string | null;
 }
 
-export async function runCaller(fault: CallerFault, count = 1): Promise<CallerLine[]> {
+// `env` overrides are laid over the test process's own env, e.g. to point the
+// Caller at a dead port and watch how it exits.
+export async function runCaller(
+  fault: CallerFault,
+  count = 1,
+  env: Record<string, string> = {},
+): Promise<CallerLine[]> {
   const { stdout } = await execFileAsync(
     "npx",
     ["tsx", "src/caller.ts", "--fault", fault, "--count", String(count)],
-    { cwd: PACKAGE_ROOT, env: process.env },
+    { cwd: PACKAGE_ROOT, env: { ...process.env, ...env } },
   );
   return stdout
     .split("\n")

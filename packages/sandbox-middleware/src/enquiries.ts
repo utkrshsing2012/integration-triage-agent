@@ -6,7 +6,7 @@ import { prisma } from "./db.js";
 import { EnquirySchema } from "./enquiry-schema.js";
 import { mintEnquiryIds } from "./ids.js";
 import { logger } from "./logger.js";
-import { callPartner } from "./upstream-client.js";
+import { UpstreamError, callPartner } from "./upstream-client.js";
 
 export const enquiries = Router();
 
@@ -65,28 +65,48 @@ enquiries.post("/enquiries", async (req, res) => {
     lead_id: ids.leadId,
   });
 
-  // Arrows 4 to 9: three calls in order through the one chokepoint.
-  const created = await callPartner<{ partner_ref: string }>({
-    method: "POST",
-    path: "/partner/enquiries",
-    body: { product: enquiry.product, applicant: enquiry.applicant, sum_insured: enquiry.sum_insured },
-  });
-  const ref = encodeURIComponent(created.body.partner_ref);
+  // Arrows 4 to 9: three calls in order through the one chokepoint. The first
+  // call that fails ends the run: the later endpoints are never reached.
+  let partnerRef: string;
+  let finalStatus: string;
+  try {
+    const created = await callPartner<{ partner_ref: string }>({
+      method: "POST",
+      path: "/partner/enquiries",
+      body: { product: enquiry.product, applicant: enquiry.applicant, sum_insured: enquiry.sum_insured },
+    });
+    partnerRef = created.body.partner_ref;
+    const ref = encodeURIComponent(partnerRef);
 
-  await callPartner({
-    method: "POST",
-    path: `/partner/enquiries/${ref}/documents`,
-    body: { documents: enquiry.documents },
-  });
+    await callPartner({
+      method: "POST",
+      path: `/partner/enquiries/${ref}/documents`,
+      body: { documents: enquiry.documents },
+    });
 
-  const finalised = await callPartner<{ status: string }>({
-    method: "POST",
-    path: `/partner/enquiries/${ref}/finalise`,
-  });
+    const finalised = await callPartner<{ status: string }>({
+      method: "POST",
+      path: `/partner/enquiries/${ref}/finalise`,
+    });
+    finalStatus = finalised.body.status;
+  } catch (err) {
+    if (!(err instanceof UpstreamError)) throw err;
+    // Upstream-failure path: any failed Partner call (non-2xx, timeout,
+    // connection refused) is a 502 to the Caller with the ids to hand to the
+    // Triage Service. The outbound Call Record was already written by the client.
+    await prisma.enquiry.update({ where: { journeyId: ids.journeyId }, data: { status: "failed" } });
+    await logger.error("upstream call failed", {
+      message: err.message,
+      status: err.status,
+      error_code: err.errorCode,
+    });
+    await finish(502, { error: err.message, request_id: ctx.requestId, journey_id: ids.journeyId });
+    return;
+  }
 
   await prisma.enquiry.update({ where: { journeyId: ids.journeyId }, data: { status: "submitted" } });
-  await logger.info("submitted", { partner_ref: created.body.partner_ref });
+  await logger.info("submitted", { partner_ref: partnerRef });
 
   // Arrows 10 and 11.
-  await finish(201, { journey_id: ids.journeyId, cycle_id: ids.cycleId, status: finalised.body.status });
+  await finish(201, { journey_id: ids.journeyId, cycle_id: ids.cycleId, status: finalStatus });
 });

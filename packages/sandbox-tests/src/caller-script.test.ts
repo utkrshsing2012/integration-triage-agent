@@ -3,12 +3,28 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
+import { readFault, useFaultReset } from "./fault-switch.js";
 import { runCaller } from "./run-caller.js";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 
 describe("Caller script", () => {
+  useFaultReset();
+
+  it("rejects a Fault name it does not know with exit code 2", async () => {
+    await expect(runCaller("disk_full" as never)).rejects.toMatchObject({ code: 2 });
+  });
+
+  it("resets the admin switch to none when it exits on an error", async () => {
+    // Plant an upstream Fault, then point the Caller at a port nothing listens on:
+    // the switch is set, the Enquiry fails, the finally block still resets it.
+    await expect(
+      runCaller("schema_drift", 1, { MIDDLEWARE_URL: "http://127.0.0.1:9" }),
+    ).rejects.toMatchObject({ code: 1 });
+    expect(await readFault()).toBe("none");
+  });
+
   it("--count 3 produces three distinct Journey Ids, all submitted", async () => {
     const lines = await runCaller("none", 3);
     expect(lines).toHaveLength(3);

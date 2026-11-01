@@ -6,8 +6,11 @@ import { config } from "./config.js";
 import { contextIds } from "./context.js";
 import { prisma } from "./db.js";
 
-// Retry and timeout policy as one object. Later Faults add fields here
-// (#6: retry on 429, three attempts, zero delay) instead of editing control flow.
+// Retry and timeout policy as one object. Each later Fault ticket adds one
+// field here instead of editing the control flow in callPartner:
+//   #5 rate_limit_429: the retry rule (retry only on 429, three retries, zero delay, Retry-After ignored)
+//   #6 auth_expired:   the token rule (static bearer, never refreshed, no retry on 401)
+//   #7 upstream_timeout: timeoutMs below is the fixed client timeout (PARTNER_TIMEOUT_MS)
 export const partnerPolicy = {
   timeoutMs: config.partnerTimeoutMs,
   bearerToken: config.partnerToken,
@@ -73,6 +76,12 @@ export async function callPartner<T = unknown>(call: PartnerCall): Promise<Partn
     });
     status = res.status;
     responseBody = await readJson(res);
+    // A non-2xx answer carries the Partner's own code (VALIDATION_ERROR,
+    // TOKEN_EXPIRED, RATE_LIMITED) in its body; the Call Record lifts it into
+    // error_code so the Fingerprint is readable without parsing response_body.
+    if (status < 200 || status >= 300) {
+      errorCode = (responseBody as { code?: string } | null)?.code ?? null;
+    }
   } catch (err) {
     failure = err;
     errorCode = errorCodeFor(err);
@@ -100,8 +109,7 @@ export async function callPartner<T = unknown>(call: PartnerCall): Promise<Partn
     throw new UpstreamError(`${call.method} ${url} failed: ${errorCode}`, null, errorCode);
   }
   if (status === null || status < 200 || status >= 300) {
-    const code = (responseBody as { code?: string } | null)?.code ?? null;
-    throw new UpstreamError(`${call.method} ${url} answered ${status}`, status, code);
+    throw new UpstreamError(`${call.method} ${url} answered ${status}`, status, errorCode);
   }
   return { status, body: responseBody as T };
 }

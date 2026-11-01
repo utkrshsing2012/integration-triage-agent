@@ -23,7 +23,8 @@ app.use((req, res, next) => {
 
 app.use(enquiries);
 
-// Last resort: anything not handled above. #4 adds the 502 upstream-failure path.
+// Last resort: anything not handled above. Upstream failures never reach here;
+// the enquiries handler turns them into 502 itself.
 app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = err instanceof Error ? err.message : String(err);
   void logger.error("unhandled error", { message }).catch(() => undefined);

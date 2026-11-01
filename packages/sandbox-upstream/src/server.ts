@@ -1,8 +1,12 @@
 import express from "express";
 import { randomBytes } from "node:crypto";
+import { FAULTS, faultDispatch, faultFromEnv, isFault, type Fault } from "./faults.js";
 
 const PORT = Number(process.env.PORT ?? 3002);
 const PARTNER_TOKEN = process.env.PARTNER_TOKEN ?? "sandbox-token-change-me";
+
+// The only state this process holds. A restart resets it to PARTNER_FAULT.
+let currentFault: Fault = faultFromEnv(process.env.PARTNER_FAULT);
 
 const app = express();
 // Documents arrive as base64 inside the JSON body, so the default 100kb is too small.
@@ -10,6 +14,26 @@ app.use(express.json({ limit: "5mb" }));
 
 app.get("/health", (_req, res) => {
   res.status(200).json({ status: "ok", service: "sandbox-upstream" });
+});
+
+// Admin switch: the eval harness's control plane. No bearer check, because it
+// is not part of the Partner's API; the Triage Service never calls it.
+app.get("/__admin/fault", (_req, res) => {
+  res.status(200).json({ fault: currentFault });
+});
+
+app.post("/__admin/fault", (req, res) => {
+  const requested: unknown = req.body?.fault;
+  if (!isFault(requested)) {
+    res.status(400).json({
+      code: "INVALID_FAULT",
+      message: `fault must be one of ${FAULTS.join("|")}`,
+      received: requested ?? null,
+    });
+    return;
+  }
+  currentFault = requested;
+  res.status(200).json({ fault: currentFault });
 });
 
 // Static bearer check on the three business endpoints. UNAUTHORISED is
@@ -23,8 +47,9 @@ partner.use((req, res, next) => {
   next();
 });
 
-// #4 adds here one middleware that dispatches on the current Fault through a
-// table keyed by Fault name, before the business routes below.
+// One middleware applies the current Fault, looked up by name in
+// FAULT_HANDLERS (faults.ts), before the business routes below.
+partner.use(faultDispatch(() => currentFault));
 
 // create-enquiry: returns a partner enquiry ref. Stateless: the ref is not stored.
 partner.post("/enquiries", (_req, res) => {

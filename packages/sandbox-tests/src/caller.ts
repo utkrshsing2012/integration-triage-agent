@@ -2,16 +2,35 @@
 // for the run. Prints one JSON line per Enquiry: journey_id, HTTP status,
 // outcome, request_id.
 //
-//   npx tsx src/caller.ts --fault none|caller_error --count <n>
+//   npx tsx src/caller.ts --fault none|caller_error|schema_drift|rate_limit_429|auth_expired|upstream_timeout --count <n>
 //
-// Upstream Faults (schema_drift, rate_limit_429, auth_expired, upstream_timeout)
-// arrive with the admin switch in #4.
+// For the four upstream Faults it POSTs the admin switch on the Sandbox
+// Upstream first, then sends valid Enquiries. For caller_error it sets the
+// switch to none and sends the canonical malformed payload. The switch is
+// reset to none at exit, whatever happened.
 import { parseArgs } from "node:util";
-import { MIDDLEWARE_URL } from "./env.js";
+import { MIDDLEWARE_URL, UPSTREAM_URL } from "./env.js";
 import { callerErrorEnquiry, seededEnquiry } from "./seed.js";
 
-const SUPPORTED_FAULTS = ["none", "caller_error"] as const;
+const UPSTREAM_FAULTS = ["schema_drift", "rate_limit_429", "auth_expired", "upstream_timeout"] as const;
+const SUPPORTED_FAULTS = ["none", "caller_error", ...UPSTREAM_FAULTS] as const;
 type Fault = (typeof SUPPORTED_FAULTS)[number];
+type UpstreamFault = (typeof UPSTREAM_FAULTS)[number];
+
+function isUpstreamFault(fault: Fault): fault is UpstreamFault {
+  return (UPSTREAM_FAULTS as readonly string[]).includes(fault);
+}
+
+async function setUpstreamFault(fault: UpstreamFault | "none"): Promise<void> {
+  const res = await fetch(`${UPSTREAM_URL}/__admin/fault`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ fault }),
+  });
+  if (res.status !== 200) {
+    throw new Error(`POST ${UPSTREAM_URL}/__admin/fault {fault: ${fault}} answered ${res.status}`);
+  }
+}
 
 function outcomeFor(status: number, body: { status?: string }): string {
   if (status === 201) return body.status ?? "submitted";
@@ -54,8 +73,23 @@ async function main(): Promise<void> {
     console.error(`--count must be a positive integer (got "${values.count}")`);
     process.exit(2);
   }
-  for (let i = 0; i < count; i++) {
-    await sendEnquiry(fault, i);
+
+  // A signal mid-run must not leave the Fault planted for the next run.
+  const resetOnSignal = (signal: NodeJS.Signals) => {
+    void setUpstreamFault("none")
+      .catch(() => undefined)
+      .finally(() => process.exit(signal === "SIGINT" ? 130 : 143));
+  };
+  process.once("SIGINT", resetOnSignal);
+  process.once("SIGTERM", resetOnSignal);
+
+  try {
+    await setUpstreamFault(isUpstreamFault(fault) ? fault : "none");
+    for (let i = 0; i < count; i++) {
+      await sendEnquiry(fault, i);
+    }
+  } finally {
+    await setUpstreamFault("none");
   }
 }
 
