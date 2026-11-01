@@ -1,12 +1,12 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import pg from "pg";
-import { TRIAGE_RO_DATABASE_URL } from "./env.js";
+import type pg from "pg";
 import { useFaultReset } from "./fault-switch.js";
+import { connectAsTriageRo } from "./planted-fault.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
 
-// Correlation: every row a run produced shares the Journey Id, and every
+// Correlation: every row one Enquiry produced shares the Journey Id, and every
 // outbound Call Record shares the inbound Call Record's Request Id.
-describe("Correlation across one run", () => {
+describe("Correlation across one Enquiry", () => {
   // Registered before this file's own beforeAll: the Caller resets the switch
   // itself, so only a check that runs first can catch a Fault left planted.
   useFaultReset();
@@ -15,8 +15,7 @@ describe("Correlation across one run", () => {
   let line: CallerLine;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
     [line] = await runCaller("none");
     expect(line.status).toBe(201);
   });
@@ -25,7 +24,7 @@ describe("Correlation across one run", () => {
     await client.end();
   });
 
-  it("every Call Record and Log Line of the run shares the Journey Id and Cycle Id", async () => {
+  it("every Call Record and Log Line of the Enquiry shares the Journey Id and Cycle Id", async () => {
     const enquiry = await client.query(`SELECT cycle_id FROM enquiries WHERE journey_id = $1`, [line.journey_id]);
     const cycleId = enquiry.rows[0].cycle_id;
 
@@ -58,7 +57,7 @@ describe("Correlation across one run", () => {
     }
   });
 
-  it("no row of another Journey carries this run's Request Id", async () => {
+  it("no row of another Journey carries this Enquiry's Request Id", async () => {
     const result = await client.query(
       `SELECT count(*) FROM call_records WHERE request_id = $1 AND journey_id IS DISTINCT FROM $2`,
       [line.request_id, line.journey_id],

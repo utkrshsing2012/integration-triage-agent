@@ -10,15 +10,15 @@
 // reset to none at exit, whatever happened.
 import { parseArgs } from "node:util";
 import { MIDDLEWARE_URL, UPSTREAM_URL } from "./env.js";
+import { CALLER_FAULTS, UPSTREAM_FAULTS, type CallerFault, type UpstreamFault } from "./fault-switch.js";
 import { callerErrorEnquiry, seededEnquiry } from "./seed.js";
 
-const UPSTREAM_FAULTS = ["schema_drift", "rate_limit_429", "auth_expired", "upstream_timeout"] as const;
-const SUPPORTED_FAULTS = ["none", "caller_error", ...UPSTREAM_FAULTS] as const;
-type Fault = (typeof SUPPORTED_FAULTS)[number];
-type UpstreamFault = (typeof UPSTREAM_FAULTS)[number];
-
-function isUpstreamFault(fault: Fault): fault is UpstreamFault {
+function isUpstreamFault(fault: CallerFault): fault is UpstreamFault {
   return (UPSTREAM_FAULTS as readonly string[]).includes(fault);
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
 }
 
 async function setUpstreamFault(fault: UpstreamFault | "none"): Promise<void> {
@@ -38,7 +38,7 @@ function outcomeFor(status: number, body: { status?: string }): string {
   return "upstream_failure";
 }
 
-async function sendEnquiry(fault: Fault, index: number): Promise<void> {
+async function sendEnquiry(fault: CallerFault, index: number): Promise<void> {
   const payload = fault === "caller_error" ? callerErrorEnquiry(index) : seededEnquiry(index);
   const res = await fetch(`${MIDDLEWARE_URL}/enquiries`, {
     method: "POST",
@@ -63,9 +63,9 @@ async function main(): Promise<void> {
       count: { type: "string", default: "1" },
     },
   });
-  const fault = values.fault as Fault;
-  if (!SUPPORTED_FAULTS.includes(fault)) {
-    console.error(`--fault must be one of ${SUPPORTED_FAULTS.join("|")} (got "${values.fault}")`);
+  const fault = values.fault as CallerFault;
+  if (!CALLER_FAULTS.includes(fault)) {
+    console.error(`--fault must be one of ${CALLER_FAULTS.join("|")} (got "${values.fault}")`);
     process.exit(2);
   }
   const count = Number(values.count);
@@ -83,17 +83,28 @@ async function main(): Promise<void> {
   process.once("SIGINT", resetOnSignal);
   process.once("SIGTERM", resetOnSignal);
 
+  let runError: unknown;
   try {
     await setUpstreamFault(isUpstreamFault(fault) ? fault : "none");
     for (let i = 0; i < count; i++) {
       await sendEnquiry(fault, i);
     }
+  } catch (err) {
+    runError = err;
+    throw err;
   } finally {
-    await setUpstreamFault("none");
+    // A failed reset is reported, but must not mask the error that got us here:
+    // it is only thrown when the run itself succeeded.
+    try {
+      await setUpstreamFault("none");
+    } catch (resetErr) {
+      console.error(`could not reset the Fault to none: ${errorMessage(resetErr)}`);
+      if (runError === undefined) throw resetErr;
+    }
   }
 }
 
 main().catch((err) => {
-  console.error(err instanceof Error ? err.message : String(err));
+  console.error(errorMessage(err));
   process.exit(1);
 });

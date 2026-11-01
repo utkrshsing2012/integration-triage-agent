@@ -1,9 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import pg from "pg";
-import { MIDDLEWARE_URL, TRIAGE_RO_DATABASE_URL, UPSTREAM_URL } from "./env.js";
+import type pg from "pg";
+import { UPSTREAM_URL } from "./env.js";
 import { readFault, setFault, useFaultReset } from "./fault-switch.js";
+import {
+  connectAsTriageRo,
+  expectCallerSaw502,
+  expectUpstreamFailure,
+  expectUpstreamFailureLine,
+  sendEnquiryWithFault,
+  type EnquiryReply,
+} from "./planted-fault.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
-import { seededEnquiry } from "./seed.js";
 
 // auth_expired Fault: every business endpoint on the Sandbox Upstream answers
 // 401 {code TOKEN_EXPIRED}. The Sandbox Middleware never refreshes its static
@@ -16,8 +23,7 @@ describe("auth_expired Fingerprint", () => {
   let client: pg.Client;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
   });
 
   afterAll(async () => {
@@ -25,76 +31,34 @@ describe("auth_expired Fingerprint", () => {
   });
 
   describe("one Enquiry sent while the Fault is planted", () => {
-    let status: number;
-    let body: { error: string; request_id: string; journey_id: string };
-    let requestId: string;
+    let reply: EnquiryReply;
 
     beforeAll(async () => {
-      await setFault("auth_expired");
-      const res = await fetch(`${MIDDLEWARE_URL}/enquiries`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(seededEnquiry(11)),
-      });
-      status = res.status;
-      body = (await res.json()) as typeof body;
-      requestId = res.headers.get("x-request-id")!;
+      reply = await sendEnquiryWithFault("auth_expired", 11);
     });
 
     it("Caller sees 502 with error, request_id, and journey_id in the body", () => {
-      expect(status).toBe(502);
-      expect(body.error).toEqual(expect.any(String));
-      expect(body.request_id).toBe(requestId);
-      expect(body.journey_id).toMatch(/^QTN-\d{4}-\d{6}$/);
+      expectCallerSaw502(reply);
     });
 
     it("leaves exactly one outbound Call Record: status 401, error_code TOKEN_EXPIRED, no retry", async () => {
       const result = await client.query(
         `SELECT url, status, error_code, response_body, journey_id FROM call_records
          WHERE request_id = $1 AND direction = 'outbound' ORDER BY id`,
-        [requestId],
+        [reply.requestId],
       );
       expect(result.rows).toHaveLength(1);
       const [row] = result.rows;
       expect(row.url).toMatch(/\/partner\/enquiries$/);
       expect(row.status).toBe(401);
       expect(row.error_code).toBe("TOKEN_EXPIRED");
-      expect(row.journey_id).toBe(body.journey_id);
+      expect(row.journey_id).toBe(reply.body.journey_id);
       expect(row.response_body).toMatchObject({ code: "TOKEN_EXPIRED" });
     });
 
-    it("never calls upload-documents or finalise-submission for that Journey", async () => {
-      const result = await client.query(
-        `SELECT count(*) FROM call_records
-         WHERE journey_id = $1 AND direction = 'outbound' AND (url LIKE '%/documents' OR url LIKE '%/finalise')`,
-        [body.journey_id],
-      );
-      expect(Number(result.rows[0].count)).toBe(0);
-    });
-
-    it("updates the inbound Call Record to status 502 with the 502 body", async () => {
-      const result = await client.query(
-        `SELECT status, response_body, journey_id FROM call_records
-         WHERE request_id = $1 AND direction = 'inbound'`,
-        [requestId],
-      );
-      expect(result.rows).toHaveLength(1);
-      expect(result.rows[0]).toMatchObject({ status: 502, journey_id: body.journey_id });
-      expect(result.rows[0].response_body).toMatchObject({ request_id: requestId, journey_id: body.journey_id });
-    });
-
-    it("sets the enquiries row to status failed", async () => {
-      const result = await client.query(`SELECT status FROM enquiries WHERE journey_id = $1`, [body.journey_id]);
-      expect(result.rows).toEqual([{ status: "failed" }]);
-    });
-
-    it("writes an error-level Log Line naming 401 or TOKEN_EXPIRED under the Request Id and Journey Id", async () => {
-      const result = await client.query(
-        `SELECT message, context FROM log_lines WHERE request_id = $1 AND journey_id = $2 AND level = 'error'`,
-        [requestId, body.journey_id],
-      );
-      expect(result.rows.length).toBeGreaterThanOrEqual(1);
-      expect(JSON.stringify(result.rows)).toMatch(/401|TOKEN_EXPIRED/);
+    expectUpstreamFailure(() => ({ client, reply }), {
+      naming: "naming 401 or TOKEN_EXPIRED",
+      matches: [/401|TOKEN_EXPIRED/],
     });
   });
 
@@ -126,22 +90,16 @@ describe("auth_expired Fingerprint", () => {
     });
 
     it("the Sandbox Middleware's correct token under auth_expired lands TOKEN_EXPIRED, never UNAUTHORISED, in call_records", async () => {
-      await setFault("auth_expired");
-      const res = await fetch(`${MIDDLEWARE_URL}/enquiries`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(seededEnquiry(12)),
-      });
-      expect(res.status).toBe(502);
-      const requestId = res.headers.get("x-request-id")!;
+      const reply = await sendEnquiryWithFault("auth_expired", 12);
+      expect(reply.status).toBe(502);
       const result = await client.query(
         `SELECT error_code FROM call_records WHERE request_id = $1 AND direction = 'outbound'`,
-        [requestId],
+        [reply.requestId],
       );
       expect(result.rows).toEqual([{ error_code: "TOKEN_EXPIRED" }]);
       const unauthorised = await client.query(
         `SELECT count(*) FROM call_records WHERE request_id = $1 AND error_code = 'UNAUTHORISED'`,
-        [requestId],
+        [reply.requestId],
       );
       expect(Number(unauthorised.rows[0].count)).toBe(0);
     });
@@ -156,12 +114,7 @@ describe("auth_expired Fingerprint", () => {
 
     it("returns 502 with request_id and journey_id for each of three distinct Journeys, outcome upstream_failure", () => {
       expect(lines).toHaveLength(3);
-      for (const line of lines) {
-        expect(line.status).toBe(502);
-        expect(line.outcome).toBe("upstream_failure");
-        expect(line.journey_id).toMatch(/^QTN-\d{4}-\d{6}$/);
-        expect(line.request_id).toMatch(/^[0-9a-f-]{36}$/);
-      }
+      for (const line of lines) expectUpstreamFailureLine(line);
       expect(new Set(lines.map((l) => l.journey_id)).size).toBe(3);
     });
 

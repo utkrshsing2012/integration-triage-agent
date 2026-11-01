@@ -8,15 +8,15 @@ Status: step 0 (the sandbox) complete. Build plan and concepts in `docs/STATE.md
 TypeScript, Express 5, Prisma on Postgres (pgvector image), Anthropic SDK with a hand-written agent loop. npm workspace: `packages/sandbox-middleware` (the Monitored Service stand-in), `packages/sandbox-upstream` (the Partner stand-in), `packages/sandbox-tests` (outer-edge suite and the Caller script). The Triage Service package arrives in step 1.
 
 ## Two-minute demo (step 0)
-Needs Docker with Compose and Node 24. After cloning, run `npm ci` once. Then three commands, from the repo root:
+Needs Docker with Compose and Node 24. Three commands, from the repo root:
 
 ```
-docker compose up -d --build
+npm ci && docker compose up -d --build
 npx tsx packages/sandbox-tests/src/caller.ts --fault rate_limit_429 --count 1
 docker compose exec postgres psql -U triage_ro -d sandbox -c "SELECT ts::time(3) AS at, direction, url, status, error_code, duration_ms FROM call_records WHERE journey_id = (SELECT journey_id FROM enquiries ORDER BY created_at DESC LIMIT 1) ORDER BY id;"
 ```
 
-1. **Start the stack.** Postgres boots and its init SQL creates the `sandbox` and `triage` databases and the three roles; the Sandbox Upstream starts; the Sandbox Middleware waits for Postgres to be healthy, runs its migrations, then serves. Defaults need no env file (`.env.example` documents every knob). Check with `curl -s localhost:3001/health ; curl -s localhost:3002/health`.
+1. **Install and start the stack.** `npm ci` installs the workspace (the Caller in step 2 runs from it). Then Postgres boots and its init SQL creates the `sandbox` and `triage` databases and the three roles; the Sandbox Upstream starts; the Sandbox Middleware waits for Postgres to be healthy, runs its migrations, then serves. Defaults need no env file (`.env.example` documents every knob). Check with `curl -s localhost:3001/health ; curl -s localhost:3002/health`.
 
 2. **Run one Fault through the Caller.** The Caller plants `rate_limit_429` on the Sandbox Upstream's admin switch, sends one valid Enquiry to the Sandbox Middleware, prints one JSON line, and resets the switch to `none` on exit:
 
@@ -56,7 +56,7 @@ npm test
 docker compose down -v        # stop and drop the data volume
 ```
 
-Two of the test files restart one container with `docker compose` (`PARTNER_FAULT`, `PARTNER_TIMEOUT_MS`), so the whole run takes a little over a minute (12 files, 86 tests).
+Two of the test files restart one container with `docker compose` (`PARTNER_FAULT`, `PARTNER_TIMEOUT_MS`), so the whole run takes a little over a minute (12 files, 87 tests).
 
 To run a second stack beside the first (another worktree), copy `.env.example` to `.env` there and change `COMPOSE_PROJECT_NAME`, `POSTGRES_PORT`, `UPSTREAM_PORT`, `MIDDLEWARE_PORT` and the matching `*_URL` values.
 

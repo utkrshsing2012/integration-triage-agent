@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import pg from "pg";
-import { MIDDLEWARE_URL, TRIAGE_RO_DATABASE_URL, UPSTREAM_URL } from "./env.js";
+import type pg from "pg";
+import { MIDDLEWARE_URL, UPSTREAM_URL } from "./env.js";
+import { connectAsTriageRo } from "./planted-fault.js";
 
 describe("Stack skeleton: health endpoints", () => {
   it("Sandbox Middleware answers 200 on /health", async () => {
@@ -18,8 +19,7 @@ describe("Stack skeleton: database sandbox as triage_ro", () => {
   let client: pg.Client;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
   });
 
   afterAll(async () => {

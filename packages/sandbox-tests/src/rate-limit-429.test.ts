@@ -1,9 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import pg from "pg";
-import { MIDDLEWARE_URL, TRIAGE_RO_DATABASE_URL, UPSTREAM_URL } from "./env.js";
+import type pg from "pg";
+import { PARTNER_TOKEN, UPSTREAM_URL } from "./env.js";
 import { readFault, setFault, useFaultReset } from "./fault-switch.js";
+import {
+  connectAsTriageRo,
+  expectCallerSaw502,
+  expectUpstreamFailure,
+  expectUpstreamFailureLine,
+  sendEnquiryWithFault,
+  type EnquiryReply,
+} from "./planted-fault.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
-import { seededEnquiry } from "./seed.js";
+import { CYCLE_ID } from "./shapes.js";
 
 // rate_limit_429 Fault: the Sandbox Upstream answers every business endpoint
 // with 429 and Retry-After 30. The Sandbox Middleware's deliberate weakness is
@@ -19,8 +27,7 @@ describe("rate_limit_429 Fingerprint", () => {
   let client: pg.Client;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
   });
 
   afterAll(async () => {
@@ -33,7 +40,7 @@ describe("rate_limit_429 Fingerprint", () => {
       for (const path of ["/partner/enquiries", "/partner/enquiries/PRT-TEST/documents", "/partner/enquiries/PRT-TEST/finalise"]) {
         const res = await fetch(`${UPSTREAM_URL}${path}`, {
           method: "POST",
-          headers: { "content-type": "application/json", authorization: "Bearer sandbox-token-change-me" },
+          headers: { "content-type": "application/json", authorization: `Bearer ${PARTNER_TOKEN}` },
           body: JSON.stringify({}),
         });
         expect(res.status, path).toBe(429);
@@ -44,34 +51,21 @@ describe("rate_limit_429 Fingerprint", () => {
   });
 
   describe("one Enquiry sent while the Fault is planted", () => {
-    let status: number;
-    let body: { error: string; request_id: string; journey_id: string };
-    let requestId: string;
+    let reply: EnquiryReply;
 
     beforeAll(async () => {
-      await setFault("rate_limit_429");
-      const res = await fetch(`${MIDDLEWARE_URL}/enquiries`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(seededEnquiry(11)),
-      });
-      status = res.status;
-      body = (await res.json()) as typeof body;
-      requestId = res.headers.get("x-request-id")!;
+      reply = await sendEnquiryWithFault("rate_limit_429", 11);
     });
 
     it("Caller sees 502 with error, request_id, and journey_id in the body", () => {
-      expect(status).toBe(502);
-      expect(body.error).toEqual(expect.any(String));
-      expect(body.request_id).toBe(requestId);
-      expect(body.journey_id).toMatch(/^QTN-\d{4}-\d{6}$/);
+      expectCallerSaw502(reply);
     });
 
     it("leaves exactly four outbound Call Records, all 429 RATE_LIMITED, all to create-enquiry", async () => {
       const result = await client.query(
         `SELECT url, status, error_code, response_body, journey_id, cycle_id FROM call_records
          WHERE request_id = $1 AND direction = 'outbound' ORDER BY id`,
-        [requestId],
+        [reply.requestId],
       );
       expect(result.rows).toHaveLength(ATTEMPTS);
       for (const row of result.rows) {
@@ -79,8 +73,8 @@ describe("rate_limit_429 Fingerprint", () => {
         expect(row.status).toBe(429);
         expect(row.error_code).toBe("RATE_LIMITED");
         expect(row.response_body).toMatchObject({ code: "RATE_LIMITED" });
-        expect(row.journey_id).toBe(body.journey_id);
-        expect(row.cycle_id).toMatch(/^SUB-\d{6}$/);
+        expect(row.journey_id).toBe(reply.body.journey_id);
+        expect(row.cycle_id).toMatch(CYCLE_ID);
       }
     });
 
@@ -88,7 +82,7 @@ describe("rate_limit_429 Fingerprint", () => {
       const result = await client.query(
         `SELECT extract(epoch FROM (max(ts) - min(ts))) * 1000 AS span_ms FROM call_records
          WHERE request_id = $1 AND direction = 'outbound'`,
-        [requestId],
+        [reply.requestId],
       );
       const spanMs = Number(result.rows[0].span_ms);
       expect(spanMs).toBeGreaterThanOrEqual(0);
@@ -96,39 +90,9 @@ describe("rate_limit_429 Fingerprint", () => {
       expect(spanMs).toBeLessThan(RETRY_AFTER_SECONDS * 1000);
     });
 
-    it("never calls upload-documents or finalise-submission for that Journey", async () => {
-      const result = await client.query(
-        `SELECT count(*) FROM call_records
-         WHERE journey_id = $1 AND direction = 'outbound' AND (url LIKE '%/documents' OR url LIKE '%/finalise')`,
-        [body.journey_id],
-      );
-      expect(Number(result.rows[0].count)).toBe(0);
-    });
-
-    it("updates the inbound Call Record to status 502 with the 502 body", async () => {
-      const result = await client.query(
-        `SELECT status, duration_ms, response_body, journey_id FROM call_records
-         WHERE request_id = $1 AND direction = 'inbound'`,
-        [requestId],
-      );
-      expect(result.rows).toHaveLength(1);
-      expect(result.rows[0]).toMatchObject({ status: 502, journey_id: body.journey_id });
-      expect(result.rows[0].response_body).toMatchObject({ request_id: requestId, journey_id: body.journey_id });
-    });
-
-    it("sets the enquiries row to status failed", async () => {
-      const result = await client.query(`SELECT status FROM enquiries WHERE journey_id = $1`, [body.journey_id]);
-      expect(result.rows).toEqual([{ status: "failed" }]);
-    });
-
-    it("writes an error-level Log Line naming rate limiting under the Request Id and Journey Id", async () => {
-      const result = await client.query(
-        `SELECT message, context FROM log_lines WHERE request_id = $1 AND journey_id = $2 AND level = 'error'`,
-        [requestId, body.journey_id],
-      );
-      expect(result.rows.length).toBeGreaterThanOrEqual(1);
-      expect(JSON.stringify(result.rows)).toMatch(/rate.?limit/i);
-      expect(JSON.stringify(result.rows)).toMatch(/RATE_LIMITED/);
+    expectUpstreamFailure(() => ({ client, reply }), {
+      naming: "naming rate limiting",
+      matches: [/rate.?limit/i, /RATE_LIMITED/],
     });
   });
 
@@ -136,17 +100,11 @@ describe("rate_limit_429 Fingerprint", () => {
     // schema_drift is the one planted Fault that answers a non-429 error, so it
     // stands in for "a 500 would not be retried": one attempt, no retry.
     it("does not retry a non-429 Partner answer: a single outbound Call Record", async () => {
-      await setFault("schema_drift");
-      const res = await fetch(`${MIDDLEWARE_URL}/enquiries`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify(seededEnquiry(12)),
-      });
-      expect(res.status).toBe(502);
-      const requestId = res.headers.get("x-request-id")!;
+      const reply = await sendEnquiryWithFault("schema_drift", 12);
+      expect(reply.status).toBe(502);
       const result = await client.query(
         `SELECT status FROM call_records WHERE request_id = $1 AND direction = 'outbound'`,
-        [requestId],
+        [reply.requestId],
       );
       expect(result.rows).toEqual([{ status: 400 }]);
     });
@@ -160,10 +118,7 @@ describe("rate_limit_429 Fingerprint", () => {
     });
 
     it("returns 502 with request_id and journey_id, outcome upstream_failure", () => {
-      expect(line.status).toBe(502);
-      expect(line.outcome).toBe("upstream_failure");
-      expect(line.journey_id).toMatch(/^QTN-\d{4}-\d{6}$/);
-      expect(line.request_id).toMatch(/^[0-9a-f-]{36}$/);
+      expectUpstreamFailureLine(line);
     });
 
     it("leaves four outbound 429 Call Records within two seconds and an enquiries row failed", async () => {

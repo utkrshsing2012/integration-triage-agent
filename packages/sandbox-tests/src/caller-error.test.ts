@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import pg from "pg";
-import { MIDDLEWARE_URL, TRIAGE_RO_DATABASE_URL } from "./env.js";
+import type pg from "pg";
+import { MIDDLEWARE_URL } from "./env.js";
 import { useFaultReset } from "./fault-switch.js";
+import { connectAsTriageRo } from "./planted-fault.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
+import { REQUEST_ID } from "./shapes.js";
 
 // caller_error Fault: the Caller sends a malformed Enquiry (applicant.full_name
 // missing). Fingerprint: an inbound 400 with no upstream call at all.
@@ -16,8 +18,7 @@ describe("caller_error Fingerprint (--fault caller_error)", () => {
   let enquiriesBefore: number;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
     enquiriesBefore = Number((await client.query(`SELECT count(*) FROM enquiries`)).rows[0].count);
     [line] = await runCaller("caller_error");
   });
@@ -30,7 +31,7 @@ describe("caller_error Fingerprint (--fault caller_error)", () => {
     expect(line.status).toBe(400);
     expect(line.outcome).toBe("caller_error");
     expect(line.journey_id).toBeNull();
-    expect(line.request_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(line.request_id).toMatch(REQUEST_ID);
   });
 
   it("the 400 body carries the Zod issues naming applicant.full_name", async () => {

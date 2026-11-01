@@ -1,7 +1,7 @@
 import express from "express";
 import { config } from "./config.js";
 import { runWithContext } from "./context.js";
-import { enquiries } from "./enquiries.js";
+import { enquiries, failPendingInbound } from "./enquiries.js";
 import { mintRequestId } from "./ids.js";
 import { logger } from "./logger.js";
 
@@ -24,11 +24,18 @@ app.use((req, res, next) => {
 app.use(enquiries);
 
 // Last resort: anything not handled above. Upstream failures never reach here;
-// the enquiries handler turns them into 502 itself.
-app.use((err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+// the enquiries handler turns them into 502 itself. An inbound Call Record the
+// handler had already inserted must not stay pending with a null status.
+app.use(async (err: unknown, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
   const message = err instanceof Error ? err.message : String(err);
-  void logger.error("unhandled error", { message }).catch(() => undefined);
-  res.status(500).json({ error: "INTERNAL_ERROR", request_id: res.getHeader("x-request-id") });
+  const body = { error: "INTERNAL_ERROR", message, request_id: res.getHeader("x-request-id") };
+  try {
+    await logger.error("unhandled error", { message });
+    await failPendingInbound(500, body);
+  } catch (writeErr) {
+    process.stderr.write(`could not record the unhandled error: ${String(writeErr)}\n`);
+  }
+  res.status(500).json(body);
 });
 
 app.listen(config.port, () => {

@@ -4,18 +4,11 @@ import { execFile } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import { promisify } from "node:util";
+import type { CallerFault } from "./fault-switch.js";
 
 const execFileAsync = promisify(execFile);
 
 const PACKAGE_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-
-export type CallerFault =
-  | "none"
-  | "caller_error"
-  | "schema_drift"
-  | "rate_limit_429"
-  | "auth_expired"
-  | "upstream_timeout";
 
 export interface CallerLine {
   journey_id: string | null;

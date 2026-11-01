@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import pg from "pg";
-import { TRIAGE_RO_DATABASE_URL } from "./env.js";
+import type pg from "pg";
 import { useFaultReset } from "./fault-switch.js";
+import { connectAsTriageRo } from "./planted-fault.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
+import { CYCLE_ID, JOURNEY_ID, LEAD_ID, REQUEST_ID } from "./shapes.js";
 
 // Clean path: no Fault. Arrows 1 to 11 of docs/drawings/step-0.md, asserted
 // through the Caller's reply and the rows triage_ro can read.
@@ -15,8 +16,7 @@ describe("Clean path Fingerprint (--fault none)", () => {
   let line: CallerLine;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
     [line] = await runCaller("none");
   });
 
@@ -27,8 +27,8 @@ describe("Clean path Fingerprint (--fault none)", () => {
   it("Caller sees 201 with a Journey Id and outcome submitted", () => {
     expect(line.status).toBe(201);
     expect(line.outcome).toBe("submitted");
-    expect(line.journey_id).toMatch(/^QTN-\d{4}-\d{6}$/);
-    expect(line.request_id).toMatch(/^[0-9a-f-]{36}$/);
+    expect(line.journey_id).toMatch(JOURNEY_ID);
+    expect(line.request_id).toMatch(REQUEST_ID);
   });
 
   it("enquiries row has status submitted with a one-to-one lead_id and a cycle_id", async () => {
@@ -38,8 +38,8 @@ describe("Clean path Fingerprint (--fault none)", () => {
     );
     expect(result.rows).toHaveLength(1);
     expect(result.rows[0]).toMatchObject({ journey_id: line.journey_id, status: "submitted" });
-    expect(result.rows[0].lead_id).toMatch(/^LD-\d{6}$/);
-    expect(result.rows[0].cycle_id).toMatch(/^SUB-\d{6}$/);
+    expect(result.rows[0].lead_id).toMatch(LEAD_ID);
+    expect(result.rows[0].cycle_id).toMatch(CYCLE_ID);
   });
 
   it("leaves one inbound Call Record (201) and three outbound Call Records (200) under one Request Id", async () => {
@@ -85,7 +85,7 @@ describe("Clean path Fingerprint (--fault none)", () => {
     for (const row of result.rows) {
       expect(row.request_id).toBe(line.request_id);
       expect(row.journey_id).toBe(line.journey_id);
-      expect(row.cycle_id).toMatch(/^SUB-\d{6}$/);
+      expect(row.cycle_id).toMatch(CYCLE_ID);
     }
   });
 });

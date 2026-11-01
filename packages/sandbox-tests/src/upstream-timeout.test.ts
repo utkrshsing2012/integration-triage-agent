@@ -1,13 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { execFile, execFileSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
-import path from "node:path";
-import { promisify } from "node:util";
-import pg from "pg";
-import { MIDDLEWARE_URL, TRIAGE_RO_DATABASE_URL } from "./env.js";
-import { readFault, setFault, useFaultReset } from "./fault-switch.js";
+import type pg from "pg";
+import { compose, dockerAvailable, waitForHealth } from "./compose-stack.js";
+import { MIDDLEWARE_URL } from "./env.js";
+import { readFault, useFaultReset } from "./fault-switch.js";
+import {
+  connectAsTriageRo,
+  expectCallerSaw502,
+  expectUpstreamFailure,
+  expectUpstreamFailureLine,
+  sendEnquiryWithFault,
+  type EnquiryReply,
+} from "./planted-fault.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
-import { seededEnquiry } from "./seed.js";
 
 // upstream_timeout Fault: the Sandbox Upstream goes silent for 10 s on every
 // business endpoint, so the Sandbox Middleware's fixed client timeout
@@ -21,38 +25,13 @@ const DEFAULT_TIMEOUT_MS = Number(process.env.PARTNER_TIMEOUT_MS ?? 3000);
 // once the abort has propagated out of fetch, which is a few ms at most.
 const DURATION_TOLERANCE_MS = 500;
 
-interface Reply {
-  status: number;
-  body: { error: string; request_id: string; journey_id: string };
-  requestId: string;
-  elapsedMs: number;
-}
-
-async function sendEnquiryUnderTimeout(seed: number): Promise<Reply> {
-  await setFault("upstream_timeout");
-  const startedAt = Date.now();
-  const res = await fetch(`${MIDDLEWARE_URL}/enquiries`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify(seededEnquiry(seed)),
-  });
-  const elapsedMs = Date.now() - startedAt;
-  return {
-    status: res.status,
-    body: (await res.json()) as Reply["body"],
-    requestId: res.headers.get("x-request-id")!,
-    elapsedMs,
-  };
-}
-
 describe("upstream_timeout Fingerprint", () => {
   useFaultReset();
 
   let client: pg.Client;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
   });
 
   afterAll(async () => {
@@ -60,19 +39,17 @@ describe("upstream_timeout Fingerprint", () => {
   });
 
   describe("one Enquiry sent while the Fault is planted", () => {
-    let reply: Reply;
+    let reply: EnquiryReply;
 
     beforeAll(async () => {
-      reply = await sendEnquiryUnderTimeout(11);
+      reply = await sendEnquiryWithFault("upstream_timeout", 11);
     });
 
     it("Caller sees 502 well within the 10 s upstream delay, saying the upstream timed out", () => {
-      expect(reply.status).toBe(502);
+      expectCallerSaw502(reply);
       expect(reply.elapsedMs).toBeLessThan(DEFAULT_TIMEOUT_MS + 2_000);
       expect(reply.elapsedMs).toBeLessThan(UPSTREAM_DELAY_MS);
       expect(reply.body.error).toMatch(/timed out/i);
-      expect(reply.body.request_id).toBe(reply.requestId);
-      expect(reply.body.journey_id).toMatch(/^QTN-\d{4}-\d{6}$/);
     });
 
     it("leaves exactly one outbound Call Record: status null, error_code ETIMEDOUT, no response_body, duration pinned at the timeout", async () => {
@@ -92,34 +69,9 @@ describe("upstream_timeout Fingerprint", () => {
       expect(row.duration_ms).toBeLessThanOrEqual(DEFAULT_TIMEOUT_MS + DURATION_TOLERANCE_MS);
     });
 
-    it("updates the inbound Call Record to status 502 with the 502 body", async () => {
-      const result = await client.query(
-        `SELECT status, response_body, journey_id FROM call_records
-         WHERE request_id = $1 AND direction = 'inbound'`,
-        [reply.requestId],
-      );
-      expect(result.rows).toHaveLength(1);
-      expect(result.rows[0]).toMatchObject({ status: 502, journey_id: reply.body.journey_id });
-      expect(result.rows[0].response_body.error).toMatch(/timed out/i);
-    });
-
-    it("sets the enquiries row to status failed", async () => {
-      const result = await client.query(`SELECT status FROM enquiries WHERE journey_id = $1`, [
-        reply.body.journey_id,
-      ]);
-      expect(result.rows).toEqual([{ status: "failed" }]);
-    });
-
-    it("writes an error-level Log Line naming the timeout under the Request Id and Journey Id", async () => {
-      const result = await client.query(
-        `SELECT message, context FROM log_lines
-         WHERE request_id = $1 AND journey_id = $2 AND level = 'error'`,
-        [reply.requestId, reply.body.journey_id],
-      );
-      expect(result.rows.length).toBeGreaterThanOrEqual(1);
-      const text = JSON.stringify(result.rows);
-      expect(text).toMatch(/timed out/i);
-      expect(text).toMatch(/ETIMEDOUT/);
+    expectUpstreamFailure(() => ({ client, reply }), {
+      naming: "naming the timeout",
+      matches: [/timed out/i, /ETIMEDOUT/],
     });
   });
 
@@ -134,10 +86,7 @@ describe("upstream_timeout Fingerprint", () => {
     });
 
     it("returns 502, outcome upstream_failure, before the upstream would have answered", () => {
-      expect(line.status).toBe(502);
-      expect(line.outcome).toBe("upstream_failure");
-      expect(line.journey_id).toMatch(/^QTN-\d{4}-\d{6}$/);
-      expect(line.request_id).toMatch(/^[0-9a-f-]{36}$/);
+      expectUpstreamFailureLine(line);
       expect(elapsedMs).toBeLessThan(UPSTREAM_DELAY_MS);
     });
 
@@ -168,36 +117,13 @@ describe("upstream_timeout Fingerprint", () => {
 // 10 s upstream delay is fixed. This block restarts ONLY the middleware
 // service with a shorter timeout, so it needs `docker compose` and is skipped
 // where Docker is not available (as admin-fault-env.test.ts does).
-const execFileAsync = promisify(execFile);
-const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
 const SHORT_TIMEOUT_MS = 1_000;
-
-function dockerAvailable(): boolean {
-  try {
-    execFileSync("docker", ["info"], { stdio: "ignore" });
-    return true;
-  } catch {
-    return false;
-  }
-}
 
 // Compose reads the project name and host ports from the test process's env,
 // the same way the runner passed them; PARTNER_TIMEOUT_MS is set on the command line.
 async function restartMiddlewareWithTimeout(timeoutMs: string): Promise<void> {
-  await execFileAsync("docker", ["compose", "up", "-d", "--no-build", "middleware"], {
-    cwd: REPO_ROOT,
-    env: { ...process.env, PARTNER_TIMEOUT_MS: timeoutMs },
-  });
-  const deadline = Date.now() + 60_000;
-  while (Date.now() < deadline) {
-    try {
-      if ((await fetch(`${MIDDLEWARE_URL}/health`)).status === 200) return;
-    } catch {
-      // not listening yet
-    }
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  throw new Error(`Sandbox Middleware at ${MIDDLEWARE_URL} did not come back within 60s`);
+  await compose(["up", "-d", "--no-build", "middleware"], { PARTNER_TIMEOUT_MS: timeoutMs });
+  await waitForHealth("Sandbox Middleware", MIDDLEWARE_URL);
 }
 
 describe.skipIf(!dockerAvailable())("changing PARTNER_TIMEOUT_MS moves the recorded duration", () => {
@@ -205,13 +131,12 @@ describe.skipIf(!dockerAvailable())("changing PARTNER_TIMEOUT_MS moves the recor
 
   const restoredTimeoutMs = process.env.PARTNER_TIMEOUT_MS ?? String(DEFAULT_TIMEOUT_MS);
   let client: pg.Client;
-  let reply: Reply;
+  let reply: EnquiryReply;
 
   beforeAll(async () => {
-    client = new pg.Client({ connectionString: TRIAGE_RO_DATABASE_URL });
-    await client.connect();
+    client = await connectAsTriageRo();
     await restartMiddlewareWithTimeout(String(SHORT_TIMEOUT_MS));
-    reply = await sendEnquiryUnderTimeout(12);
+    reply = await sendEnquiryWithFault("upstream_timeout", 12);
   });
 
   afterAll(async () => {

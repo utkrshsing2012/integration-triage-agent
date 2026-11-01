@@ -5,6 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { readFault, useFaultReset } from "./fault-switch.js";
 import { runCaller } from "./run-caller.js";
+import { CYCLE_ID } from "./shapes.js";
 
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -46,7 +47,7 @@ describe("Caller script", () => {
     const ours = parsed.filter((l) => l.request_id === line.request_id);
     expect(ours.map((l) => l.message)).toEqual(expect.arrayContaining(["enquiry received", "submitted"]));
     for (const entry of ours) {
-      expect(entry).toMatchObject({ journey_id: line.journey_id, cycle_id: expect.stringMatching(/^SUB-\d{6}$/) });
+      expect(entry).toMatchObject({ journey_id: line.journey_id, cycle_id: expect.stringMatching(CYCLE_ID) });
       expect(["info", "warn", "error"]).toContain(entry.level);
     }
   });

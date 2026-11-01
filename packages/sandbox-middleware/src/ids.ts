@@ -33,10 +33,10 @@ async function nextNumber(): Promise<number> {
   return counter;
 }
 
-export async function mintEnquiryIds(now = new Date()): Promise<EnquiryIds> {
+export async function mintEnquiryIds(): Promise<EnquiryIds> {
   const n = String(await nextNumber()).padStart(6, "0");
   return {
-    journeyId: `QTN-${now.getUTCFullYear()}-${n}`,
+    journeyId: `QTN-${new Date().getUTCFullYear()}-${n}`,
     leadId: `LD-${n}`,
     cycleId: `SUB-${n}`,
   };

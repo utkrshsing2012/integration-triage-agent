@@ -110,3 +110,30 @@ enquiries.post("/enquiries", async (req, res) => {
   // Arrows 10 and 11.
   await finish(201, { journey_id: ids.journeyId, cycle_id: ids.cycleId, status: finalStatus });
 });
+
+// For the last-resort error handler: the handler above threw after inserting
+// the inbound Call Record (or after minting the Journey), so close both the way
+// `finish` and the upstream-failure path would have. Finds the record by the
+// Request Id because the handler's closure is gone by the time the error lands.
+export async function failPendingInbound(status: number, body: unknown): Promise<void> {
+  const ctx = currentContext();
+  if (!ctx) return;
+  const inbound = await prisma.callRecord.findFirst({
+    where: { requestId: ctx.requestId, direction: "inbound", status: null },
+  });
+  if (inbound) {
+    await prisma.callRecord.update({
+      where: { id: inbound.id },
+      data: {
+        status,
+        durationMs: Date.now() - inbound.ts.getTime(),
+        responseBody: body as Prisma.InputJsonValue,
+        journeyId: ctx.journeyId,
+        cycleId: ctx.cycleId,
+      },
+    });
+  }
+  if (ctx.journeyId) {
+    await prisma.enquiry.update({ where: { journeyId: ctx.journeyId }, data: { status: "failed" } });
+  }
+}
