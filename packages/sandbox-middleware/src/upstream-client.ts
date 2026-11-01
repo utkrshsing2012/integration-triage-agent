@@ -89,7 +89,10 @@ export async function callPartner<T = unknown>(call: PartnerCall): Promise<Partn
 async function attemptPartner<T = unknown>(call: PartnerCall): Promise<PartnerResponse<T>> {
   const url = `${config.partnerBaseUrl}${call.path}`;
   const ids = contextIds();
-  const startedAt = Date.now();
+  // Monotonic clock, not Date.now(): the client timeout runs on the monotonic
+  // clock too, and inside a VM the wall clock can be stepped mid-call, which
+  // would record a timeout as shorter than the timeout it was pinned at.
+  const startedAt = performance.now();
 
   let status: number | null = null;
   let responseBody: unknown = null;
@@ -119,7 +122,7 @@ async function attemptPartner<T = unknown>(call: PartnerCall): Promise<PartnerRe
     errorCode = errorCodeFor(err);
   }
 
-  const durationMs = Date.now() - startedAt;
+  const durationMs = Math.round(performance.now() - startedAt);
 
   await prisma.callRecord.create({
     data: {
@@ -138,7 +141,14 @@ async function attemptPartner<T = unknown>(call: PartnerCall): Promise<PartnerRe
   });
 
   if (failure !== null) {
-    throw new UpstreamError(`${call.method} ${url} failed: ${errorCode}`, null, errorCode);
+    // ETIMEDOUT is the client giving up (AbortSignal.timeout), not the Partner
+    // answering, so the message names the timeout that fired; the Caller's
+    // 502 body and the error Log Line both carry it.
+    const reason =
+      errorCode === "ETIMEDOUT"
+        ? `upstream timed out after ${partnerPolicy.timeoutMs}ms`
+        : `failed: ${errorCode}`;
+    throw new UpstreamError(`${call.method} ${url} ${reason}`, null, errorCode);
   }
   if (status === null || status < 200 || status >= 300) {
     throw new UpstreamError(`${call.method} ${url} answered ${status}`, status, errorCode);

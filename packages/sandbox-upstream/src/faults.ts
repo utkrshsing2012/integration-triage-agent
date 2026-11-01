@@ -65,12 +65,19 @@ const authExpired: RequestHandler = (_req, res) => {
   });
 };
 
+// upstream_timeout: every business endpoint goes silent for UPSTREAM_DELAY_MS,
+// then answers normally. The delay is fixed and well past the Sandbox
+// Middleware's client timeout (PARTNER_TIMEOUT_MS), so the middleware always
+// gives up first and the answer lands on a closed socket.
+const UPSTREAM_DELAY_MS = 10_000;
+const upstreamTimeout: RequestHandler = (_req, _res, next) => void setTimeout(next, UPSTREAM_DELAY_MS);
+
 export const FAULT_HANDLERS: Record<Fault, RequestHandler> = {
   none: passThrough,
   schema_drift: schemaDrift,
   rate_limit_429: rateLimit429,
   auth_expired: authExpired,
-  upstream_timeout: passThrough, // #7 replaces: every business endpoint waits 10 s, then answers 200
+  upstream_timeout: upstreamTimeout,
 };
 
 // Applied once, before the business routes. Reads the current Fault on every
