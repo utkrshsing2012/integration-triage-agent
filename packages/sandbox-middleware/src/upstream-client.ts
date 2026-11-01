@@ -19,6 +19,9 @@ export const partnerPolicy = {
   // after the first, and `delayMs` is the wait between them. Retry-After from
   // the Partner is never read: that is the real middleware's weakness.
   retry: { onStatuses: [429] as readonly number[], retries: 3, delayMs: 0 },
+  // #6 auth_expired: the token is static. A 401 is final: no refresh exists
+  // and the call is not retried, so one TOKEN_EXPIRED Call Record per Journey.
+  refreshTokenOn401: false,
 };
 
 export interface PartnerCall {

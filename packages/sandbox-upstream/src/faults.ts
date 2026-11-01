@@ -54,11 +54,22 @@ const rateLimit429: RequestHandler = (_req, res) => {
   });
 };
 
+// auth_expired: every business endpoint answers 401 {code TOKEN_EXPIRED}. The
+// token the Sandbox Middleware sends is the right one; the Partner has
+// expired it. Deliberately a different code from UNAUTHORISED (wrong token,
+// server.ts) so the two stay distinguishable in call_records.error_code.
+const authExpired: RequestHandler = (_req, res) => {
+  res.status(401).json({
+    code: "TOKEN_EXPIRED",
+    message: "Bearer token has expired; obtain a new token",
+  });
+};
+
 export const FAULT_HANDLERS: Record<Fault, RequestHandler> = {
   none: passThrough,
   schema_drift: schemaDrift,
   rate_limit_429: rateLimit429,
-  auth_expired: passThrough, // #6 replaces: every business endpoint answers 401 {code TOKEN_EXPIRED}
+  auth_expired: authExpired,
   upstream_timeout: passThrough, // #7 replaces: every business endpoint waits 10 s, then answers 200
 };
 
