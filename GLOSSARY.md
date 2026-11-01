@@ -16,6 +16,10 @@ _Avoid_: fake service, fake middleware, mock client
 The downstream API the Monitored Service calls. In the sandbox this role is played by the Sandbox Upstream.
 _Avoid_: insurer, vendor, fake partner
 
+**Caller**:
+The system that sends Enquiries to the Monitored Service. In the real system this is the quote system; in the sandbox the role is played by the eval harness's enquiry script, which also chooses the Fault for a run.
+_Avoid_: client, user, quote system, harness
+
 **Sandbox Upstream**:
 The stand-in for a real Partner: an invented insurer-style API that answers the Sandbox Middleware's calls and plants a chosen Fault on command.
 _Avoid_: fake partner, mock partner, stub
