@@ -1,11 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { TRIAGE_RO_DATABASE_URL } from "./env.js";
+import { useFaultReset } from "./fault-switch.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
 
 // Clean path: no Fault. Arrows 1 to 11 of docs/drawings/step-0.md, asserted
 // through the Caller's reply and the rows triage_ro can read.
 describe("Clean path Fingerprint (--fault none)", () => {
+  // Registered before this file's own beforeAll: the Caller resets the switch
+  // itself, so only a check that runs first can catch a Fault left planted.
+  useFaultReset();
+
   let client: pg.Client;
   let line: CallerLine;
 

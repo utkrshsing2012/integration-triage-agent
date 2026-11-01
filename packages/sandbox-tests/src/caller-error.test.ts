@@ -1,11 +1,16 @@
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import pg from "pg";
 import { MIDDLEWARE_URL, TRIAGE_RO_DATABASE_URL } from "./env.js";
+import { useFaultReset } from "./fault-switch.js";
 import { runCaller, type CallerLine } from "./run-caller.js";
 
 // caller_error Fault: the Caller sends a malformed Enquiry (applicant.full_name
 // missing). Fingerprint: an inbound 400 with no upstream call at all.
 describe("caller_error Fingerprint (--fault caller_error)", () => {
+  // Registered before this file's own beforeAll: the Caller resets the switch
+  // itself, so only a check that runs first can catch a Fault left planted.
+  useFaultReset();
+
   let client: pg.Client;
   let line: CallerLine;
   let enquiriesBefore: number;
