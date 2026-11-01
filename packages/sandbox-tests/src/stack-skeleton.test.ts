@@ -29,8 +29,9 @@ describe("Stack skeleton: database sandbox as triage_ro", () => {
   it.each(["enquiries", "call_records", "log_lines"])(
     "SELECT on %s succeeds",
     async (table) => {
+      // Proves the grant, not emptiness: the Sandbox Middleware writes rows from #3 on.
       const result = await client.query(`SELECT * FROM ${table} LIMIT 1`);
-      expect(result.rows).toEqual([]);
+      expect(result.rows.length).toBeLessThanOrEqual(1);
     },
   );
 
