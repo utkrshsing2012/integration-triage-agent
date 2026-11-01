@@ -14,6 +14,11 @@ import { prisma } from "./db.js";
 export const partnerPolicy = {
   timeoutMs: config.partnerTimeoutMs,
   bearerToken: config.partnerToken,
+  // The retry rule, the whole of it. Only the listed statuses are retried (a
+  // 500, a 401, a timeout are not), `retries` is the number of extra attempts
+  // after the first, and `delayMs` is the wait between them. Retry-After from
+  // the Partner is never read: that is the real middleware's weakness.
+  retry: { onStatuses: [429] as readonly number[], retries: 3, delayMs: 0 },
 };
 
 export interface PartnerCall {
@@ -54,7 +59,31 @@ async function readJson(res: Response): Promise<unknown> {
   }
 }
 
+// The retry loop around one attempt. Every attempt writes its own outbound
+// Call Record (inside attemptPartner), so an exhausted 429 leaves
+// 1 + retries rows milliseconds apart under one Request Id: the Fingerprint.
 export async function callPartner<T = unknown>(call: PartnerCall): Promise<PartnerResponse<T>> {
+  const { onStatuses, retries, delayMs } = partnerPolicy.retry;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      return await attemptPartner<T>(call);
+    } catch (err) {
+      const retryable = err instanceof UpstreamError && err.status !== null && onStatuses.includes(err.status);
+      if (!retryable) throw err;
+      if (attempt > retries) {
+        throw new UpstreamError(
+          `${err.message} on all ${attempt} attempts; retries exhausted (Retry-After ignored)`,
+          err.status,
+          err.errorCode,
+        );
+      }
+      if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    }
+  }
+}
+
+// One attempt: one fetch, one outbound Call Record, whatever happened.
+async function attemptPartner<T = unknown>(call: PartnerCall): Promise<PartnerResponse<T>> {
   const url = `${config.partnerBaseUrl}${call.path}`;
   const ids = contextIds();
   const startedAt = Date.now();

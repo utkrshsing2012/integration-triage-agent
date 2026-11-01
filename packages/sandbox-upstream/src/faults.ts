@@ -42,10 +42,22 @@ const schemaDrift: RequestHandler = (req, res, next) => {
   next();
 };
 
+// rate_limit_429: every business endpoint is throttled. Retry-After says wait
+// 30 seconds; the Sandbox Middleware's known weakness is to ignore it and retry
+// at once, which is what makes the Fingerprint a burst of 429s milliseconds apart.
+const RATE_LIMIT_RETRY_AFTER_SECONDS = 30;
+const rateLimit429: RequestHandler = (_req, res) => {
+  res.set("Retry-After", String(RATE_LIMIT_RETRY_AFTER_SECONDS));
+  res.status(429).json({
+    code: "RATE_LIMITED",
+    message: `Too many requests; retry after ${RATE_LIMIT_RETRY_AFTER_SECONDS} seconds`,
+  });
+};
+
 export const FAULT_HANDLERS: Record<Fault, RequestHandler> = {
   none: passThrough,
   schema_drift: schemaDrift,
-  rate_limit_429: passThrough, // #5 replaces: every business endpoint answers 429, Retry-After 30, {code RATE_LIMITED}
+  rate_limit_429: rateLimit429,
   auth_expired: passThrough, // #6 replaces: every business endpoint answers 401 {code TOKEN_EXPIRED}
   upstream_timeout: passThrough, // #7 replaces: every business endpoint waits 10 s, then answers 200
 };
