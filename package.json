@@ -1,0 +1,17 @@
+{
+  "name": "integration-triage-agent",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Agent that triages a failing partner-API integration from logs. Step 0: the sandbox.",
+  "workspaces": [
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm test -w sandbox-tests"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}

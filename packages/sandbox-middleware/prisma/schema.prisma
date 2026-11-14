@@ -1,0 +1,72 @@
+// The three tables in database `sandbox`, all written only by the Sandbox Middleware.
+// Column shapes follow spec #1 (Implementation Decisions) and docs/drawings/step-0.md.
+// This file is the shared contract step 1's adapter reads against.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// Engine-enforced vocabularies: the database rejects anything outside these sets.
+enum EnquiryStatus {
+  received
+  submitted
+  failed
+}
+
+enum CallDirection {
+  inbound
+  outbound
+}
+
+// One row per Enquiry. Any id a developer holds resolves to a Journey Id with one SELECT.
+model Enquiry {
+  journeyId String        @id @map("journey_id") // QTN-YYYY-NNNNNN
+  leadId    String        @unique @map("lead_id") // LD-NNNNNN
+  cycleId   String        @map("cycle_id") // SUB-NNNNNN, current Cycle
+  status    EnquiryStatus
+  createdAt DateTime      @default(now()) @map("created_at") @db.Timestamptz(3)
+  updatedAt DateTime      @updatedAt @map("updated_at") @db.Timestamptz(3)
+
+  @@map("enquiries")
+}
+
+// One inbound or outbound HTTP exchange as the Sandbox Middleware recorded it.
+model CallRecord {
+  id           Int           @id @default(autoincrement())
+  ts           DateTime      @default(now()) @db.Timestamptz(3)
+  direction    CallDirection
+  method       String
+  url          String
+  status       Int? // null when no response (timeout, connection refused, inbound still pending)
+  durationMs   Int?          @map("duration_ms")
+  requestBody  Json?         @map("request_body")
+  responseBody Json?         @map("response_body")
+  errorCode    String?       @map("error_code") // e.g. TOKEN_EXPIRED, ETIMEDOUT, ECONNREFUSED
+  requestId    String        @map("request_id") @db.Uuid
+  journeyId    String?       @map("journey_id")
+  cycleId      String?       @map("cycle_id")
+
+  @@index([journeyId])
+  @@index([requestId])
+  @@map("call_records")
+}
+
+// One timestamped message the Sandbox Middleware emitted, with the three ids from context.
+model LogLine {
+  id        Int      @id @default(autoincrement())
+  ts        DateTime @default(now()) @db.Timestamptz(3)
+  level     String
+  message   String
+  context   Json?
+  requestId String?  @map("request_id") @db.Uuid // null outside a request (e.g. startup)
+  journeyId String?  @map("journey_id")
+  cycleId   String?  @map("cycle_id")
+
+  @@index([journeyId])
+  @@map("log_lines")
+}

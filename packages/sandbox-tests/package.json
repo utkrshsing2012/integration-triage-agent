@@ -1,0 +1,19 @@
+{
+  "name": "sandbox-tests",
+  "private": true,
+  "version": "0.0.0",
+  "description": "Outer-edge suite for the sandbox: HTTP in, SQL out as triage_ro. Never imports middleware or upstream code.",
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.19.2",
+    "@types/pg": "^8.23.1",
+    "pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "^5.9.3",
+    "vitest": "^3.2.7"
+  }
+}

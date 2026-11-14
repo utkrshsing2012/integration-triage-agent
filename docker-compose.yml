@@ -1,0 +1,56 @@
+# Step 0 sandbox: Postgres, Sandbox Upstream, Sandbox Middleware.
+# Host ports and the project name come from .env so several stacks can run
+# side by side (one per worktree). Inside the network, services talk by
+# service name on their container ports.
+name: ${COMPOSE_PROJECT_NAME:-s0main}
+
+services:
+  postgres:
+    image: pgvector/pgvector:pg17
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres_password_change_me}
+      SANDBOX_APP_PASSWORD: ${SANDBOX_APP_PASSWORD:-sandbox_app_password_change_me}
+      TRIAGE_APP_PASSWORD: ${TRIAGE_APP_PASSWORD:-triage_app_password_change_me}
+      TRIAGE_RO_PASSWORD: ${TRIAGE_RO_PASSWORD:-triage_ro_password_change_me}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./db/init:/docker-entrypoint-initdb.d:ro
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d sandbox"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+
+  upstream:
+    build:
+      context: .
+      dockerfile: packages/sandbox-upstream/Dockerfile
+    environment:
+      PORT: 3002
+      PARTNER_TOKEN: ${PARTNER_TOKEN:-sandbox-token-change-me}
+      PARTNER_FAULT: ${PARTNER_FAULT:-none}
+    ports:
+      - "${UPSTREAM_PORT:-3002}:3002"
+
+  middleware:
+    build:
+      context: .
+      dockerfile: packages/sandbox-middleware/Dockerfile
+    environment:
+      PORT: 3001
+      DATABASE_URL: postgresql://sandbox_app:${SANDBOX_APP_PASSWORD:-sandbox_app_password_change_me}@postgres:5432/sandbox
+      PARTNER_BASE_URL: http://upstream:3002
+      PARTNER_TOKEN: ${PARTNER_TOKEN:-sandbox-token-change-me}
+      PARTNER_TIMEOUT_MS: ${PARTNER_TIMEOUT_MS:-3000}
+    ports:
+      - "${MIDDLEWARE_PORT:-3001}:3001"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      upstream:
+        condition: service_started
+
+volumes:
+  postgres_data:
